@@ -3,7 +3,7 @@ Description=InstaBox external lease and lifecycle controller
 Wants=network-online.target
 After=network-online.target
 StartLimitIntervalSec=5min
-StartLimitBurst=4
+StartLimitBurst=20
 
 [Service]
 Type=oneshot

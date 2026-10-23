@@ -382,6 +382,11 @@ class ControllerTests(unittest.TestCase):
 
 
 class WireAndStorageTests(unittest.TestCase):
+    def test_service_start_limit_allows_minute_timer_and_retry_headroom(self):
+        unit = (Path(__file__).resolve().parents[1] / 'examples' / 'instabox-external-controller.service').read_text()
+        settings = dict(line.split('=', 1) for line in unit.splitlines() if '=' in line)
+        self.assertGreaterEqual(int(settings['StartLimitBurst']), 10)
+
     def test_missing_state_is_unhealthy(self):
         self.assertFalse(ec.health({}, NOW)["ok"])
 
