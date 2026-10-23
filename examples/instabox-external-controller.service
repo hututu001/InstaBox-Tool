@@ -1,0 +1,16 @@
+[Unit]
+Description=InstaBox external lease and lifecycle controller
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=5min
+StartLimitBurst=4
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.local/lib/instabox-controller/external_controller.py --config %h/.config/instabox-controller/config.json --key-file %h/.config/instabox-controller/api-key --state %h/.local/state/instabox-controller/state.json --log-file %h/.local/state/instabox-controller/controller.jsonl
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=15min
+Restart=on-failure
+RestartSec=60s

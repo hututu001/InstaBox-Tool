@@ -13,7 +13,7 @@
 ### 完成安装
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH" && bash <(curl -fsSL https://raw.githubusercontent.com/Pretic/InstaBox-Tool/main/setup.sh)
+export PATH="$HOME/.local/bin:$PATH" && bash <(curl -fsSL https://raw.githubusercontent.com/hututu001/InstaBox-Tool/main/setup.sh)
 ```
 
 按以下顺序完成首次配置：
@@ -300,4 +300,4 @@ BBR 设置检查内核支持，写入 `/etc/sysctl.d/90-insta-box-tool-bbr.conf`
 | 保活结果异常 | 查看 `ibt keepalive status` 和 `ibt keepalive logs`，确认目标、期限及定时器 |
 | 机器已暂停或停止 | 先从控制台或独立控制端恢复，再检查暂停原因和保活状态 |
 
-提交问题可使用 [Issues](https://github.com/Pretic/InstaBox-Tool/issues)。附上相关命令、工具版本和错误信息；请删除 API Key、SSH token、完整节点链接等私密内容。
+提交本 fork 的问题可使用 [Issues](https://github.com/hututu001/InstaBox-Tool/issues)。附上相关命令、工具版本和错误信息；请删除 API Key、SSH token、完整节点链接等私密内容。

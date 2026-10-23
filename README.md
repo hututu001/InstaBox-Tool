@@ -2,6 +2,8 @@
 
 **版本：0.0.1** · [MIT License](LICENSE)
 
+本 fork 保留上游 [Pretic/InstaBox-Tool](https://github.com/Pretic/InstaBox-Tool) 功能，新增可选的[独立控制端：十分钟续租、七小时轮换、平台冷却恢复](docs/external-controller.md)。不会在普通安装或更新时自动启用暂停/恢复。
+
 在 InstaBox 上一键安装 **sing-box + Cloudflare Quick Tunnel**，自动配置本机保活。安装后输入 `ibt`，通过中文菜单管理节点、云端机器和系统设置。
 
 > [!IMPORTANT]
@@ -32,7 +34,7 @@
 在机器的 Linux 终端中，以**普通用户**执行下方命令，不要加 `sudo`。需要 Linux x86_64、Python 3 和可用的用户级 systemd。
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH" && bash <(curl -fsSL https://raw.githubusercontent.com/Pretic/InstaBox-Tool/main/setup.sh)
+export PATH="$HOME/.local/bin:$PATH" && bash <(curl -fsSL https://raw.githubusercontent.com/hututu001/InstaBox-Tool/main/setup.sh)
 ```
 
 按提示粘贴 API Key 并回车，**输入时不显示字符**。验证通过后，安装器自动完成：

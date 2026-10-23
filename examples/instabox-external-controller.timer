@@ -1,0 +1,11 @@
+[Unit]
+Description=Advance InstaBox external controller every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Unit=instabox-external-controller.service
+
+[Install]
+WantedBy=timers.target

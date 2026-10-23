@@ -18,7 +18,7 @@ IBT_INITIAL_TZ_PRESENT="${TZ+x}"
 IBT_INITIAL_TZ_VALUE="${TZ-}"
 APP="$HOME/.local/share/insta-box"
 CFG="$HOME/.config/insta-box"
-SETUP='https://raw.githubusercontent.com/Pretic/InstaBox-Tool/main/setup.sh'
+SETUP='https://raw.githubusercontent.com/hututu001/InstaBox-Tool/main/setup.sh'
 # The previous menu re-execs its old command after an update. A one-use
 # migration bridge lets that process hand off, and is removed on first use.
 for legacy_command in ib isb; do

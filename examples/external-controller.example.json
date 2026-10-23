@@ -1,0 +1,9 @@
+{
+  "machine_ids": ["m_REPLACE_WITH_YOUR_MACHINE_ID"],
+  "lease_id": "external-controller",
+  "ttl_seconds": 3600,
+  "renew_interval_seconds": 600,
+  "rotate_after_seconds": 25200,
+  "suspend_hold_seconds": 30,
+  "retry_seconds": 60
+}

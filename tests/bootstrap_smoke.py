@@ -135,7 +135,7 @@ urllib.request.build_opener = lambda *handlers: OfflineAPI()
     match = re.search(r"^FILES=\(([^\n)]*)\)$", (ROOT / "setup.sh").read_text(), re.M)
     assert match, "setup runtime file list is missing"
     runtime_files = shlex.split(match.group(1))
-    assert len(runtime_files) == len(set(runtime_files)) == 15
+    assert len(runtime_files) == len(set(runtime_files)) == 16
     assert all(re.fullmatch(r"[A-Za-z0-9_.-]+", name) and name not in (".", "..") for name in runtime_files)
     for name in (*runtime_files, "SHA256SUMS"):
         shutil.copy2(ROOT / name, source / name)
@@ -385,14 +385,14 @@ while (( $# )); do
 done
 [[ -n "$url" && -n "$out" ]] || exit 97
 case "$url" in
- https://api.github.com/repos/Pretic/InstaBox-Tool/git/ref/heads/main)
+ https://api.github.com/repos/hututu001/InstaBox-Tool/git/ref/heads/main)
    printf '%s\\n' "$url" >> "$HOME/download-urls"
    printf '{"object":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}\\n' > "$out"
    exit 0 ;;
- https://raw.githubusercontent.com/Pretic/InstaBox-Tool/main/setup.sh)
+ https://raw.githubusercontent.com/hututu001/InstaBox-Tool/main/setup.sh)
    file=setup.sh ;;
  *)
-   if [[ "$url" =~ ^https://raw[.]githubusercontent[.]com/Pretic/InstaBox-Tool/[a-f0-9]{40}/([A-Za-z0-9_.-]+)$ ]]; then
+   if [[ "$url" =~ ^https://raw[.]githubusercontent[.]com/hututu001/InstaBox-Tool/[a-f0-9]{40}/([A-Za-z0-9_.-]+)$ ]]; then
      file="${BASH_REMATCH[1]}"
    elif [[ "$url" == "$FIXTURE_SB_URL" || "$url" == "$FIXTURE_CF_URL" ]]; then
      file="${url##*/}"
@@ -504,9 +504,9 @@ if [[ "$file" == "${CORRUPT_FILE:-}" ]]; then echo BAD >> "$out"; fi
     result = run([str(local_bin / "ibt"), "update"], {"IBT_REF": "", "IB_REF": "", "ISB_REF": ""})
     assert result.returncode == 0, result.stderr + result.stdout
     downloads = (fixture_home / "download-urls").read_text().splitlines()[len(downloads_before):]
-    assert downloads[:2] == ["https://raw.githubusercontent.com/Pretic/InstaBox-Tool/main/setup.sh",
-                             "https://api.github.com/repos/Pretic/InstaBox-Tool/git/ref/heads/main"], downloads
-    assert downloads[2:] == ["https://raw.githubusercontent.com/Pretic/InstaBox-Tool/" + "a" * 40 + "/" + name
+    assert downloads[:2] == ["https://raw.githubusercontent.com/hututu001/InstaBox-Tool/main/setup.sh",
+                             "https://api.github.com/repos/hututu001/InstaBox-Tool/git/ref/heads/main"], downloads
+    assert downloads[2:] == ["https://raw.githubusercontent.com/hututu001/InstaBox-Tool/" + "a" * 40 + "/" + name
                             for name in ("SHA256SUMS", *runtime_files)], downloads
     assert cli.is_symlink() and cli.resolve() != previous, "a successful update did not switch the versioned bundle"
     preserved()

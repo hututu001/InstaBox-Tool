@@ -25,7 +25,7 @@ import uuid
 
 VERSION = "0.0.1"
 FILES = ("setup.sh", "ibt.sh", "install.sh", "keepalive.sh", "platform.mjs", "cf_route.py", "cf_select.py",
-         "heartbeat.py", "cloud.py", "ssh_tokens.py", "machine_opt.py", "node_probe.py", "system_info.py", "ui_time.py", "migrate.py")
+         "heartbeat.py", "cloud.py", "ssh_tokens.py", "machine_opt.py", "node_probe.py", "system_info.py", "ui_time.py", "migrate.py", "external_controller.py")
 OLD_MARKER = "# Managed-by: Insta-Sing-box"
 V3_MARKER = "# Managed-by: Insta Box"
 NEW_MARKER = "# Managed-by: InstaBox Tool"

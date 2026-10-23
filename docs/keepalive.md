@@ -4,6 +4,8 @@
 
 首次安装会通过 InstaBox API 为本机配置保活。日常由后台定时任务更新活动租约，退出菜单后仍会继续执行。一个控制端可维护一台或多台机器，无需机器之间互相连接。
 
+本 fork 另有显式启用的[独立生命周期控制器](external-controller.md)，组合十分钟续租一小时、七小时主动轮换和冷却恢复。下面仍描述原有保活菜单，更新不会自动开启轮换。
+
 ## 配置目标
 
 进入 **4「机器保活」**，按需要选择：
@@ -26,7 +28,7 @@
 也可以在独立、常在线的 Linux 机器上只安装管理工具，再选择目标：
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH" && bash <(curl -fsSL https://raw.githubusercontent.com/Pretic/InstaBox-Tool/main/setup.sh) --menu-only
+export PATH="$HOME/.local/bin:$PATH" && bash <(curl -fsSL https://raw.githubusercontent.com/hututu001/InstaBox-Tool/main/setup.sh) --menu-only
 ibt keepalive add-api
 ```
 
