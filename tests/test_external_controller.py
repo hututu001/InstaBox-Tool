@@ -216,6 +216,17 @@ class ControllerTests(unittest.TestCase):
         self.tick(60)
         self.assertEqual(first, self.api.mutations()[-1][3])
 
+    def test_existing_suspend_intent_survives_a_changed_rotation_threshold(self):
+        self.api.machine = machine(run=NOW - 700)
+        self.controller.config["rotate_after_seconds"] = 600
+        self.api.failures["POST"] = [ec.APIError()]
+        self.tick()
+        first = self.api.mutations()[0][3]
+        self.controller.config["rotate_after_seconds"] = 25200
+        self.tick(60)
+        self.assertEqual(len(self.api.mutations()), 2)
+        self.assertEqual(first, self.api.mutations()[-1][3])
+
     def test_lost_suspend_response_confirmed_by_state_without_duplicate(self):
         self.api.machine = machine(run=NOW - 25200)
         self.api.failures["POST"] = [ec.APIError()]

@@ -327,7 +327,7 @@ class Controller:
             cap = machine.get("maxRunMinutes", -1)
             if isinstance(cap, int) and cap > 0:
                 threshold = min(threshold, max(60, cap * 60 - 600))
-            if now - run >= threshold:
+            if now - run >= threshold or (cycle and cycle["stage"] == "suspend"):
                 cycle = cycle or self.new_cycle(mid, s, "seven_hours", now)
                 self.phase(mid, s, "suspend_requested")
                 try:
