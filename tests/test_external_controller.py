@@ -178,11 +178,53 @@ class ControllerTests(unittest.TestCase):
         self.tick(60)
         self.assertEqual(len(self.api.mutations()), 2)
 
-    def test_unmanaged_pause_is_unhealthy_without_resume(self):
+    def test_unmanaged_pause_automatically_resumes_without_lease_history(self):
         self.api.machine = machine('suspended')
         self.tick()
-        self.assertFalse(ec.health(self.state, self.now)['ok'])
+        self.assertEqual(self.target['cycle']['reason'], 'ensure_online')
+        self.assertTrue(self.api.mutations()[0][1].endswith('/resume'))
+
+    def test_unexpected_pause_recovers_and_renews_with_new_run_clock(self):
+        self.api.machine = machine('suspended')
+        self.api.failures['POST'] = [ec.APIError(503)] * 3
+        for advance in [0, 60, 60, 60]:
+            self.tick(advance)
+        self.assertEqual(len({call[3] for call in self.api.mutations()}), 1)
+        self.api.machine = machine(run=self.now + 5)
+        self.tick(60)
+        self.assertNotIn('cycle', self.target)
+        self.assertEqual(self.target['last_success'], self.now)
+        self.assertEqual(self.target['run_started_at'], self.now - 55)
+
+    def test_unexpected_pause_honors_cooldown_rejection(self):
+        self.api.machine = machine('suspended')
+        self.api.failures['POST'] = [ec.APIError(409, 'machine_cooldown', NOW + 600)]
+        self.tick()
+        self.tick(300)
+        self.assertEqual(len(self.api.mutations()), 1)
+        self.tick(300)
+        self.assertEqual(len(self.api.mutations()), 2)
+
+    def test_maintenance_prevents_mutations_and_can_be_disabled(self):
+        self.controller.config['maintenance'] = True
+        self.api.machine = machine('suspended', cooldown=NOW + 60)
+        ec.run_ticks(self.controller, sleep=lambda _: self.fail('must not fast poll'))
         self.assertFalse(self.api.mutations())
+        self.assertFalse(self.api.mutations('PUT'))
+        self.assertTrue(ec.health(self.state, self.now)['ok'])
+        self.controller.config['maintenance'] = False
+        self.tick(60)
+        self.assertTrue(self.api.mutations()[0][1].endswith('/resume'))
+
+    def test_maintenance_preserves_pending_intent_without_advancing_it(self):
+        self.api.machine = machine(run=NOW - 25200)
+        self.tick()
+        key = self.target['cycle']['pending']['key']
+        self.controller.config['maintenance'] = True
+        self.tick(1200)
+        self.assertEqual(len(self.api.mutations()), 1)
+        self.assertEqual(self.target['cycle']['pending']['key'], key)
+        self.assertTrue(ec.health(self.state, self.now)['ok'])
 
     def test_readiness_wait_preserves_lease_without_repeating_renewal(self):
         self.api.machine = machine(runtime={'ready': False})
@@ -242,13 +284,13 @@ class ControllerTests(unittest.TestCase):
         self.assertNotIn("cycle", self.target)
         self.assertFalse(self.api.mutations())
 
-    def test_old_cooldown_never_resumes_later_manual_pause(self):
+    def test_old_cooldown_does_not_block_recovery_of_later_pause(self):
         self.api.machine = machine(run=NOW - 100, cooldown=NOW - 1000)
         self.tick()
         self.api.machine["state"] = "suspended"
         self.tick(60)
-        self.assertEqual(self.target["phase"], "unmanaged_pause")
-        self.assertFalse(self.api.mutations())
+        self.assertEqual(self.target["phase"], "resume_requested")
+        self.assertTrue(self.api.mutations()[-1][1].endswith('/resume'))
 
     def test_expired_cooldown_for_current_run_recovers_without_another_wait(self):
         self.api.machine = machine("suspended", run=NOW - 30000, cooldown=NOW - 60)

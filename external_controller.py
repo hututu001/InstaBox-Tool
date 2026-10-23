@@ -116,6 +116,8 @@ def validate_config(config):
     if len(set(ids)) != len(ids):
         raise ValueError("Duplicate machine ID")
     result = dict(config)
+    if type(result.setdefault("maintenance", False)) is not bool:
+        raise ValueError("maintenance must be a boolean")
     for name, default, low, high in [
         ("ttl_seconds", 3600, 30, 3600),
         ("renew_interval_seconds", 600, 30, 1200),
@@ -264,6 +266,10 @@ class Controller:
         s.update(last_checked_at=iso(now), machine_state=state,
                  observed_run_started_at=machine.get("runStartedAt"),
                  observed_cooldown_until=machine.get("cooldownUntil"))
+        if self.config["maintenance"]:
+            self.phase(mid, s, "maintenance")
+            s.pop("attention", None)
+            return
         cycle = s.get("cycle")
         if cycle and cycle.get("cooldown_probe_at") and cooldown:
             cycle["cooldown_until"] = cooldown
@@ -350,12 +356,7 @@ class Controller:
             return
         if state == "suspended":
             if not cycle:
-                self.phase(mid, s, "unmanaged_pause")
-                # PUT may wake idle-suspended machines, but the platform rejects
-                # it for manual pauses. Never fall back to resume in this case.
-                if s.get("last_success") and timestamp(s.get("expires_at")) <= now:
-                    self.renew(mid, s, now, force=True)
-                return
+                cycle = self.new_cycle(mid, s, "ensure_online", now)
             if cycle["stage"] == "suspend":
                 cycle.update(stage="hold", suspended_at=now)
                 cycle.pop("pending", None)
@@ -419,6 +420,9 @@ def health(state, now):
             names.add("unmanaged_pause")
         if s.get("consecutive_errors", 0) >= 3:
             names.add("repeated_api_failure")
+        if s.get("phase") == "maintenance":
+            issues.extend({"machine_id": mid, "issue": name} for name in sorted(names))
+            continue
         cycle = s.get("cycle", {})
         expected_cooldown = cycle and now < cycle.get("cooldown_until", 0)
         if not expected_cooldown:
@@ -442,7 +446,7 @@ def run_ticks(controller, budget=180, monotonic=time.monotonic, sleep=time.sleep
         result = controller.tick()
         now = controller.clock()
         active = any(s.get("cycle") and
-                     s.get("phase") not in {"max_run_disabled", "run_reset_unconfirmed"} and
+                     s.get("phase") not in {"maintenance", "max_run_disabled", "run_reset_unconfirmed"} and
                      now >= s.get("retry_at", 0) and
                      now >= s["cycle"].get("cooldown_until", 0)
                      for mid, s in controller.state["machines"].items()
