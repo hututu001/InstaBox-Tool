@@ -159,14 +159,71 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(len(self.api.mutations()), 2)
         self.assertNotEqual(first_key, self.api.mutations()[-1][3])
 
-    def test_cooldown_409_without_header_uses_ten_minute_fallback(self):
+    def test_cooldown_409_without_header_rechecks_next_minute(self):
         self.start_cooldown()
         self.api.failures["POST"] = [ec.APIError(409, "machine_cooldown")]
         self.tick(600)
-        self.tick(540)
+        self.tick(30)
+        self.assertEqual(len(self.api.mutations()), 1)
+        self.tick(30)
+        self.assertEqual(len(self.api.mutations()), 2)
+
+    def test_cooldown_probe_uses_updated_official_deadline(self):
+        self.start_cooldown()
+        self.api.failures['POST'] = [ec.APIError(409, 'machine_cooldown')]
+        self.tick(600)
+        self.api.machine['cooldownUntil'] = ec.iso(NOW + 720)
+        self.tick(60)
         self.assertEqual(len(self.api.mutations()), 1)
         self.tick(60)
         self.assertEqual(len(self.api.mutations()), 2)
+
+    def test_unmanaged_pause_is_unhealthy_without_resume(self):
+        self.api.machine = machine('suspended')
+        self.tick()
+        self.assertFalse(ec.health(self.state, self.now)['ok'])
+        self.assertFalse(self.api.mutations())
+
+    def test_readiness_wait_preserves_lease_without_repeating_renewal(self):
+        self.api.machine = machine(runtime={'ready': False})
+        self.tick()
+        self.tick(60)
+        self.assertEqual(len(self.api.mutations('PUT')), 1)
+        self.tick(540)
+        self.assertEqual(len(self.api.mutations('PUT')), 2)
+        self.assertEqual(self.target['phase'], 'runtime_wait')
+
+    def test_cooldown_does_not_hide_api_failures(self):
+        self.start_cooldown(until=NOW + 3600)
+        self.api.failures['GET'] = [ec.APIError(503)] * 3
+        for _ in range(3):
+            self.tick(60)
+        self.assertIn({'machine_id': MID, 'issue': 'repeated_api_failure'},
+                      ec.health(self.state, self.now)['issues'])
+
+    def test_fast_polling_finishes_cycle_and_returns_to_timer(self):
+        self.api.machine = machine(run=NOW - 25200)
+        sleeps = []
+        def sleep(seconds):
+            sleeps.append(seconds)
+            self.now += seconds
+            self.api.now = self.now
+            cycle = self.target.get('cycle', {})
+            if cycle.get('stage') == 'suspend':
+                self.api.machine['state'] = 'suspended'
+            elif cycle.get('stage') == 'resume':
+                self.api.machine = machine(run=self.now)
+        result = ec.run_ticks(self.controller, monotonic=lambda: self.now, sleep=sleep)
+        self.assertEqual(result, 0)
+        self.assertEqual(sleeps, [10] * 5)
+        self.assertEqual(self.target['phase'], 'running')
+        self.assertNotIn('cycle', self.target)
+
+    def test_fast_polling_never_sleeps_through_cooldown_or_failure(self):
+        self.api.machine = machine('suspended', cooldown=NOW + 600)
+        with mock.patch.object(ec.time, 'sleep') as sleeper:
+            ec.run_ticks(self.controller, sleep=sleeper)
+            sleeper.assert_not_called()
 
     def test_cooldown_success_restarts_seven_hours_and_renews_immediately(self):
         self.start_cooldown()

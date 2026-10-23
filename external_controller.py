@@ -195,7 +195,8 @@ class Controller:
                                  {"ttlSeconds": self.config["ttl_seconds"]})
         if timestamp(lease.get("expiresAt")) <= now:
             raise APIError(0, "invalid_lease_expiry")
-        s.update(last_success=now, expires_at=lease["expiresAt"], lease_run=s.get("run_started_at"))
+        s.update(last_success=now, expires_at=lease["expiresAt"],
+                 lease_run=timestamp(s.get("observed_run_started_at")) or s.get("run_started_at"))
         self.save()
         self.log(mid, s, "lease_renewed", expires_at=lease["expiresAt"])
 
@@ -227,7 +228,8 @@ class Controller:
                     cycle.pop("pending", None)
                     cycle.update(reason="cooldown", stage="hold",
                                  cooldown_until=max(cycle.get("cooldown_until", 0),
-                                                    error.retry_at or now + 600))
+                                                    error.retry_at))
+                    cycle["cooldown_probe_at"] = error.retry_at or now + self.config["retry_seconds"]
                     self.log(mid, s, "cooldown_reported", until=iso(cycle["cooldown_until"]))
                 raise
         if (not OP_ID.fullmatch(str(result.get("id", ""))) or result.get("machineId") != mid
@@ -263,6 +265,8 @@ class Controller:
                  observed_run_started_at=machine.get("runStartedAt"),
                  observed_cooldown_until=machine.get("cooldownUntil"))
         cycle = s.get("cycle")
+        if cycle and cycle.get("cooldown_probe_at") and cooldown:
+            cycle["cooldown_until"] = cooldown
         # A past deadline retained on a later run is history, not a fresh pause.
         reference_run = run or s.get("run_started_at", 0)
         fresh_cooldown = cooldown > s.get("handled_cooldown_until", 0) and (
@@ -301,6 +305,10 @@ class Controller:
                 raise APIError(0, "invalid_machine_response")
             if not runtime.get("ready"):
                 self.phase(mid, s, "runtime_wait")
+                # Preserve activity while readiness converges, except while
+                # deliberately suspending or waiting for a lifecycle mutation.
+                if not cycle or cycle.get("stage") != "suspend":
+                    self.renew(mid, s, now, force=s.get("lease_run") != run)
                 return
             if not run or run > now + 60:
                 self.renew(mid, s, now)
@@ -407,11 +415,13 @@ def health(state, now):
         names = set()
         if s.get("attention"):
             names.add(s["attention"])
+        if s.get("phase") == "unmanaged_pause":
+            names.add("unmanaged_pause")
+        if s.get("consecutive_errors", 0) >= 3:
+            names.add("repeated_api_failure")
         cycle = s.get("cycle", {})
         expected_cooldown = cycle and now < cycle.get("cooldown_until", 0)
         if not expected_cooldown:
-            if s.get("consecutive_errors", 0) >= 3:
-                names.add("repeated_api_failure")
             if s.get("phase") == "running" and now - s.get("last_success", 0) > 1200:
                 names.add("lease_renewal_stale")
             if cycle:
@@ -423,6 +433,23 @@ def health(state, now):
                 names.add("machine_transition_stalled")
         issues.extend({"machine_id": mid, "issue": name} for name in sorted(names))
     return {"ok": not issues, "checked_at": iso(now), "issues": issues}
+
+
+def run_ticks(controller, budget=180, monotonic=time.monotonic, sleep=time.sleep):
+    """Brief fast polling only during our active lifecycle; timer handles idle time."""
+    end = monotonic() + budget
+    while True:
+        result = controller.tick()
+        now = controller.clock()
+        active = any(s.get("cycle") and
+                     s.get("phase") not in {"max_run_disabled", "run_reset_unconfirmed"} and
+                     now >= s.get("retry_at", 0) and
+                     now >= s["cycle"].get("cooldown_until", 0)
+                     for mid, s in controller.state["machines"].items()
+                     if mid in controller.config["machine_ids"])
+        if result or not active or monotonic() + 10 >= end:
+            return result
+        sleep(10)
 
 
 def main():
@@ -462,7 +489,8 @@ def main():
             if not isinstance(state, dict) or state.get("schema", 1) != 1 or not isinstance(state.get("machines", {}), dict):
                 raise ValueError("Invalid state file; preserve it for inspection")
             key = Path(args.key_file).read_text(encoding="utf-8").strip()
-            return Controller(config, API(key), state, lambda: atomic_json(state_path, state), emit).tick()
+            return run_ticks(Controller(config, API(key), state,
+                                        lambda: atomic_json(state_path, state), emit))
         except (OSError, ValueError, TypeError, KeyError):
             emit({"at": iso(time.time()), "event": "controller_local_error",
                   "detail": "Check local configuration, state and file permissions; raw values omitted"})
