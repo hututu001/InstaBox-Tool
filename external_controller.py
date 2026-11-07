@@ -54,12 +54,23 @@ def retry_deadline(value, now):
 
 
 class APIError(Exception):
-    def __init__(self, status=0, code="", retry_at=0):
+    def __init__(self, status=0, code="", retry_at=0, retryable=None, reason=""):
         self.status = status
         # Never log raw responses/messages or arbitrary server strings.
         self.code = code if isinstance(code, str) and re.fullmatch(r"[a-z_]{1,60}", code) else "unknown"
         self.retry_at = retry_at
+        self.retryable = retryable if type(retryable) is bool else None
+        self.reason = reason if isinstance(reason, str) and reason in {"abuse_egress_blocklist", "abuse_network_flows", "abuse_cpu", "abuse_proxy"} else ""
         super().__init__(f"HTTP {status} {self.code}")
+
+    @classmethod
+    def from_payload(cls, status, payload, now, header=None):
+        payload = payload if isinstance(payload, dict) else {}
+        seconds = payload.get("retryAfterSeconds")
+        body_at = retry_deadline(seconds, now) if type(seconds) in {int, float} else 0
+        return cls(status, payload.get("code", "unknown"),
+                   max(retry_deadline(header, now), body_at),
+                   payload.get("retryable"), payload.get("reason", ""))
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -98,10 +109,11 @@ class API:
         except urllib.error.HTTPError as error:
             try:
                 payload = json.loads(error.read(65536))
-                code = payload.get("error", {}).get("code", "unknown")
+                detail = payload.get("error", {})
             except (ValueError, AttributeError, OSError):
-                code = "unknown"
-            raise APIError(error.code, code, retry_deadline(error.headers.get("Retry-After"), self.clock())) from None
+                detail = {}
+            raise APIError.from_payload(error.code, detail, self.clock(),
+                                        error.headers.get("Retry-After")) from None
         except (urllib.error.URLError, TimeoutError, OSError, ValueError,
                 http.client.HTTPException, RecursionError):
             raise APIError(0, "transport_or_response_error") from None
@@ -124,6 +136,7 @@ def validate_config(config):
         ("rotate_after_seconds", 25200, 600, 86400),
         ("suspend_hold_seconds", 30, 30, 300),
         ("retry_seconds", 60, 30, 300),
+        ("runtime_margin_seconds", 120, 90, 240),
     ]:
         value = result.setdefault(name, default)
         if type(value) is not int or not low <= value <= high:
@@ -169,10 +182,20 @@ class Controller:
                 failed = True
                 s["consecutive_errors"] = s.get("consecutive_errors", 0) + 1
                 delay = 600 if error.status in {400, 401, 402, 403, 404} else self.config["retry_seconds"]
-                s["retry_at"] = max(now + delay, error.retry_at)
-                s["error"] = {"at": iso(now), "status": error.status, "code": error.code}
+                # A request timeout consumed wall time already. Retry intervals
+                # start after it, and never override the platform's deadline.
+                finished = self.clock()
+                if finished < s.get("deadline_watch_until", 0) and error.retryable is not False and (
+                        error.status in {0, 408, 409, 429} or error.status >= 500):
+                    delay = 15
+                if error.retryable is False:
+                    delay = max(delay, 600)
+                s["retry_at"] = max(finished + delay, error.retry_at)
+                s["error"] = {"at": iso(finished), "status": error.status, "code": error.code,
+                              "retryable": error.retryable, "reason": error.reason}
                 self.log(mid, s, "retry_scheduled", status=error.status, code=error.code,
-                         attempt=s["consecutive_errors"], retry_at=iso(s["retry_at"]))
+                         attempt=s["consecutive_errors"], retry_at=iso(s["retry_at"]),
+                         retryable=error.retryable, reason=error.reason or None)
             # A failed durable save must stop the process, not allow a mutation.
             self.save()
         self.state["last_tick_at"] = iso(self.clock())
@@ -182,11 +205,13 @@ class Controller:
     def new_cycle(self, mid, s, reason, now, cooldown=0):
         s["cycle"] = {"id": uuid.uuid4().hex, "reason": reason,
                       "created_at": now, "prior_run": s.get("run_started_at", 0) or timestamp(s.get("observed_run_started_at")),
-                      "stage": "suspend" if reason == "seven_hours" else "hold",
+                      "stage": "suspend" if reason in {"seven_hours", "scheduled_rotation", "runtime_limit"} else "hold",
                       "cooldown_until": cooldown}
         self.save()
         self.log(mid, s, "cycle_started", reason=reason,
-                 prior_run=s.get("run_started_at"), cooldown_until=cooldown or None)
+                 prior_run=s.get("run_started_at"), cooldown_until=cooldown or None,
+                 max_run_minutes=s.get("observed_max_run_minutes"),
+                 rotation_due_at=s.get("rotation_due_at"))
         return s["cycle"]
 
     def renew(self, mid, s, now, force=False):
@@ -227,12 +252,7 @@ class Controller:
                         and not pending.get("uncertain") and error.code != "idempotency_conflict"):
                     cycle.pop("pending", None)  # definite rejection; next attempt gets a fresh key
                 if error.code == "machine_cooldown":
-                    cycle.pop("pending", None)
-                    cycle.update(reason="cooldown", stage="hold",
-                                 cooldown_until=max(cycle.get("cooldown_until", 0),
-                                                    error.retry_at))
-                    cycle["cooldown_probe_at"] = error.retry_at or now + self.config["retry_seconds"]
-                    self.log(mid, s, "cooldown_reported", until=iso(cycle["cooldown_until"]))
+                    self.report_cooldown(mid, s, cycle, error, self.clock())
                 raise
         if (not OP_ID.fullmatch(str(result.get("id", ""))) or result.get("machineId") != mid
                 or result.get("type") != action
@@ -244,7 +264,11 @@ class Controller:
         self.save()
         if result["state"] == "failed":
             cycle.pop("pending", None)
-            raise APIError(503, "operation_failed")
+            detail = result.get("error") or {"code": "operation_failed"}
+            error = APIError.from_payload(503, detail, self.clock())
+            if error.code == "machine_cooldown":
+                self.report_cooldown(mid, s, cycle, error, self.clock())
+            raise error
         if result["state"] == "succeeded":
             pending.setdefault("succeeded_at", now)
             if now - pending["succeeded_at"] >= 120:
@@ -256,8 +280,20 @@ class Controller:
             self.log(mid, s, "operation_stalled", action=action, age_seconds=now - pending["created_at"])
             s["attention"] = "operation_stalled"
 
-    def check(self, mid, s, now):
+    def report_cooldown(self, mid, s, cycle, error, now):
+        cycle.pop("pending", None)
+        cycle.update(reason="cooldown", stage="hold",
+                     cooldown_until=max(cycle.get("cooldown_until", 0), error.retry_at))
+        cycle["cooldown_probe_at"] = error.retry_at or now + self.config["retry_seconds"]
+        s.pop("deadline_watch_until", None)
+        if error.reason:
+            s["cooldown_reason"] = error.reason
+        self.log(mid, s, "cooldown_reported", until=iso(cycle["cooldown_until"]),
+                 reason=error.reason or None)
+
+    def check(self, mid, s, now, confirm_rotation=False):
         machine = self.api.request("GET", f"/v1/machines/{mid}")
+        now = self.clock()
         if machine.get("id") != mid or not isinstance(machine.get("state"), str):
             raise APIError(0, "invalid_machine_response")
         state = machine["state"]
@@ -266,13 +302,19 @@ class Controller:
         s.update(last_checked_at=iso(now), machine_state=state,
                  observed_run_started_at=machine.get("runStartedAt"),
                  observed_cooldown_until=machine.get("cooldownUntil"))
+        reason = machine.get("cooldownReason")
+        if cooldown > now and isinstance(reason, str) and reason in {"abuse_egress_blocklist", "abuse_network_flows", "abuse_cpu", "abuse_proxy"}:
+            s["cooldown_reason"] = reason
+        elif max(cooldown, s.get("cycle", {}).get("cooldown_until", 0)) <= now:
+            s.pop("cooldown_reason", None)
         if self.config["maintenance"]:
             self.phase(mid, s, "maintenance")
             s.pop("attention", None)
             return
         cycle = s.get("cycle")
         if cycle and cycle.get("cooldown_probe_at") and cooldown:
-            cycle["cooldown_until"] = cooldown
+            # Never shorten an authoritative Retry-After using a stale GET.
+            cycle["cooldown_until"] = max(cycle.get("cooldown_until", 0), cooldown)
         # A past deadline retained on a later run is history, not a fresh pause.
         reference_run = run or s.get("run_started_at", 0)
         fresh_cooldown = cooldown > s.get("handled_cooldown_until", 0) and (
@@ -290,6 +332,7 @@ class Controller:
             s["attention"] = "max_run_disabled"
             return
         if cycle and now < cycle.get("cooldown_until", 0):
+            s.pop("deadline_watch_until", None)
             self.phase(mid, s, "cooldown_wait")
             return
         if machine.get("operationId") or state in {"suspending", "resuming", "starting"}:
@@ -339,10 +382,33 @@ class Controller:
             s.pop("attention", None)
             threshold = self.config["rotate_after_seconds"]
             cap = machine.get("maxRunMinutes", -1)
-            if isinstance(cap, int) and cap > 0:
-                threshold = min(threshold, max(60, cap * 60 - 600))
+            if type(cap) is not int or cap < -1:
+                raise APIError(0, "invalid_runtime_limit")
+            if s.get("observed_max_run_minutes") != cap:
+                self.log(mid, s, "runtime_limit_changed", previous=s.get("observed_max_run_minutes"),
+                         max_run_minutes=cap, run_started_at=iso(run))
+            s["observed_max_run_minutes"] = cap
+            s["runtime_deadline_at"] = run + cap * 60 if cap > 0 else None
+            if cap > 0:
+                threshold = min(threshold, max(0, cap * 60 - self.config["runtime_margin_seconds"]))
+            due = run + threshold
+            s["rotation_due_at"] = due
+            if due - now <= 360:
+                s["deadline_watch_until"] = due + self.config["runtime_margin_seconds"]
+            else:
+                s.pop("deadline_watch_until", None)
+            if cycle and cycle["stage"] == "suspend" and not cycle.get("pending") and now < due:
+                # No request is in doubt or accepted: a newer deadline may
+                # safely supersede this unsent or explicitly rejected intent.
+                self.log(mid, s, "cycle_rescheduled", rotation_due_at=due)
+                s.pop("cycle", None)
+                cycle = None
             if now - run >= threshold or (cycle and cycle["stage"] == "suspend"):
-                cycle = cycle or self.new_cycle(mid, s, "seven_hours", now)
+                if not cycle and not confirm_rotation:
+                    # Recheck after the scheduling decision; an extension or
+                    # concurrent platform pause may have just happened.
+                    return self.check(mid, s, self.clock(), confirm_rotation=True)
+                cycle = cycle or self.new_cycle(mid, s, "runtime_limit" if threshold < self.config["rotate_after_seconds"] else "scheduled_rotation", now)
                 self.phase(mid, s, "suspend_requested")
                 try:
                     self.renew(mid, s, now, force=s.get("lease_run") != run)
@@ -362,7 +428,7 @@ class Controller:
                 cycle.pop("pending", None)
                 self.save()
                 self.log(mid, s, "suspend_confirmed")
-            if cycle["reason"] == "seven_hours" and now < cycle.get("suspended_at", now) + self.config["suspend_hold_seconds"]:
+            if cycle["reason"] in {"seven_hours", "scheduled_rotation", "runtime_limit"} and now < cycle.get("suspended_at", now) + self.config["suspend_hold_seconds"]:
                 self.phase(mid, s, "suspend_hold")
                 return
             cycle["stage"] = "resume"
@@ -416,6 +482,8 @@ def health(state, now):
         names = set()
         if s.get("attention"):
             names.add(s["attention"])
+        if s.get("cooldown_reason"):
+            names.add("security_lock_" + s["cooldown_reason"])
         if s.get("phase") == "unmanaged_pause":
             names.add("unmanaged_pause")
         if s.get("consecutive_errors", 0) >= 3:
@@ -439,20 +507,21 @@ def health(state, now):
     return {"ok": not issues, "checked_at": iso(now), "issues": issues}
 
 
-def run_ticks(controller, budget=180, monotonic=time.monotonic, sleep=time.sleep):
+def run_ticks(controller, budget=480, monotonic=time.monotonic, sleep=time.sleep):
     """Brief fast polling only during our active lifecycle; timer handles idle time."""
     end = monotonic() + budget
     while True:
         result = controller.tick()
         now = controller.clock()
-        active = any(s.get("cycle") and
+        active = any((s.get("cycle") or now < s.get("deadline_watch_until", 0)) and
                      s.get("phase") not in {"maintenance", "max_run_disabled", "run_reset_unconfirmed"} and
-                     now >= s.get("retry_at", 0) and
-                     now >= s["cycle"].get("cooldown_until", 0)
+                     s.get("retry_at", 0) <= now + 30 and
+                     now >= s.get("cycle", {}).get("cooldown_until", 0)
                      for mid, s in controller.state["machines"].items()
                      if mid in controller.config["machine_ids"])
-        if result or not active or monotonic() + 10 >= end:
-            return result
+        if not active or monotonic() + 10 >= end:
+            return int(any(s.get("error") for mid, s in controller.state["machines"].items()
+                           if mid in controller.config["machine_ids"]))
         sleep(10)
 
 

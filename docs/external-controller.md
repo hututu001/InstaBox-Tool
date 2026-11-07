@@ -1,16 +1,16 @@
-# 独立控制端：续租、七小时轮换、冷却恢复
+# 独立控制端：续租、动态期限轮换、冷却恢复
 
 这是本 fork 新增的**显式启用功能**。上游作者为 [Pre / Pretic](https://github.com/Pretic/InstaBox-Tool)。原有 `ibt keepalive` 菜单与自动安装行为不变，不会因为更新工具就开始暂停机器。
 
-控制器必须放在另一台常在线的 Linux 主机，例如香港 VPS，不能只放在被管理的 InstaBox 内部。一个脚本完成所有流程，systemd 约每分钟运行一轮，不在进程里睡七小时。默认每十分钟续租一小时，机器连续运行七小时后主动 suspend，确认暂停后等待至少三十秒，再 resume。恢复确认后立即续租，并以平台的新 `runStartedAt` 开始下一轮。
+控制器必须放在另一台常在线的 Linux 主机，例如香港 VPS，不能只放在被管理的 InstaBox 内部。一个脚本完成所有流程，systemd 正常约每分钟运行一轮。默认每十分钟续租一小时，在“运行七小时”或“官方当前期限前两分钟”中较早的时间主动 suspend，确认暂停后等待至少三十秒，再 resume。恢复确认后立即续租，并以平台的新 `runStartedAt` 开始下一轮。
 
 ## 官方规则与边界
 
 依据 [InstaBox OpenAPI](https://api.instabox.sh/v1/openapi.json) 的 `MaxRunMinutes`、`Machine`、活动租约与生命周期接口：
 
 - 租约最长 3600 秒；到期后开始完整的闲置期。有效租约不取消连续运行上限。
-- 免费机器连续运行上限默认 480 分钟。`-1` 表示无限制，`0` 表示立即睡眠，不能把 `0` 当成禁用限制。
-- 达到上限后的冷却默认十分钟，实际以 `cooldownUntil` 和 `Retry-After` 为准。所有唤醒路径在冷却中都可能返回 `409 machine_cooldown`。
+- 免费机启用动态运行后，每轮初始 120 分钟；到期前五分钟评估过去三十个完整分钟的实际工作，至少五个活跃分钟延期两小时，一至四个延期半小时，没有则不延期，连续总上限八小时。每次 GET 返回的 `maxRunMinutes` 才是当前实际值；租约/wake 不计作延期所需工作。参见 [官方动态规则](https://instabox.sh/docs/machines/auto-pause#dynamic-runtime-on-the-free-plan)。`-1` 表示无限制，`0` 表示立即睡眠。
+- 免费机连续 max-run 暂停的冷却可能为 5–20、60–75、120–135 分钟；安全锁可能更长。始终遵守实际 `cooldownUntil`、`Retry-After` 与错误体 `retryAfterSeconds`，不猜固定时长。所有唤醒路径在冷却中都可能返回 `409 machine_cooldown`。
 - `runStartedAt` 只在确认睡眠后重置。主动暂停能否如预期重置当前账号的时钟，**仍需实机验收**；回归测试模拟官方契约，不冒充实测。
 - 显式生命周期操作会让已有租约失效，恢复后必须立刻重新续租。
 - `suspend` 不发送 JSON 请求体。`suspend` / `resume` 都使用持久化的 `Idempotency-Key`，HTTP 202 仅表示受理。
@@ -19,10 +19,10 @@
 ## 同一个循环
 
 1. **正常运行**：读取平台状态，每十分钟 PUT 同一 lease ID，TTL 一小时；首次接管和发现新一轮运行时立即续租。成功时记录平台实际返回的 `expiresAt`。
-2. **七小时到点**：先持久化轮换意图和幂等键，再请求暂停。确认 `suspended` 后开始计算三十秒等待；流程中临时每十秒推进一次，等待结束后请求恢复。
+2. **动态期限到点**：每次 GET 重新计算 `runStartedAt + min(rotate_after_seconds, maxRunMinutes*60-runtime_margin_seconds)`；默认余量 120 秒。到轮换点前六分钟进入十秒检查，让官方的期限前五分钟评估先发生。首次发出暂停前二次 GET；若延期或状态改变就重新判断。只有没有已受理/未知结果请求的旧意图才可安全取消。先持久化意图和幂等键，再请求暂停；确认 `suspended` 后至少等三十秒再恢复。
 3. **遇到有效冷却**：优先等待平台截止时间。晚三分钟发现十分钟冷却，只等剩余七分钟，不在每轮检查中重新计算十分钟。冷却到点后尝试恢复。
 4. **恢复后**：确认 `running`、`runtime.ready` 和新的 `runStartedAt`，重新建立租约。若时钟未更新，记录 `run_reset_unconfirmed`，继续保活和观察，不声称轮换成功，不反复暂停。
-5. **重试**：网络错误/5xx 默认下一分钟重试，没有“三次失败永久退出”的上限。401/403 等配置或权限错误降低为十分钟一次，方便修正凭据后自行恢复。429/冷却遵守 `Retry-After`。连续失败通过健康检查报告，不能把持续重试当作成功。
+5. **重试**：网络错误/5xx 正常一分钟重试；临近期限的可重试错误缩短到十五秒，时间从请求完成后计算。官方给出的更晚等待期限优先。401/403 或明确不可重试错误降低为十分钟一次，告警并方便条件修正后恢复；不因失败三次永久退出。HTTP 错误及失败异步操作均读取 code、retryable、reason、retryAfterSeconds。连续失败通过健康检查报告。
 
 冷却结束后的 resume 可以连续失败多次，后续仍继续尝试。若恢复又返回 `machine_cooldown`，优先按 `Retry-After` 延后；缺少提示时一分钟后重新确认机器状态，再按已知官方期限尝试，并记录原因。
 
@@ -48,7 +48,7 @@ install -m 700 external_controller.py "$HOME/.local/lib/instabox-controller/exte
 install -m 600 examples/external-controller.example.json "$HOME/.config/instabox-controller/config.json"
 ```
 
-编辑 `~/.config/instabox-controller/config.json`，将占位机器 ID 换成实际目标。若有多个控制端，使用各自的 lease ID；同一机器只保留一个生命周期管理者。租约至少覆盖三个续租间隔，默认覆盖六个。七小时阈值遇到更短的正数平台上限时，会提前到上限前十分钟。
+编辑 `~/.config/instabox-controller/config.json`，将占位机器 ID 换成实际目标。若有多个控制端，使用各自的 lease ID；同一机器只保留一个生命周期管理者。租约至少覆盖三个续租间隔，默认覆盖六个。`runtime_margin_seconds` 默认 120，允许 90–240 秒，以留出官方期限前五分钟评估机会及操作缓冲。
 
 交互写入具有 `machines:write` 权限的密钥，不要把密钥作为命令行参数或写进仓库：
 
@@ -103,10 +103,14 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 
 ## 异常恢复与轮换调度更新
 
-正常状态仍由一分钟 timer 驱动，十分钟续租一小时。进入本控制器的暂停/恢复流程后，单次执行最多用三分钟、每十秒推进一次；完成、接口失败或等待明确冷却期限时退出，交回 timer。暂停确认后仍等待至少三十秒。实际停机时间取决于平台操作速度，不能保证固定秒数。
+正常状态仍由一分钟 timer 驱动，十分钟续租一小时。临近轮换或进入暂停/恢复流程后，单次快速推进预算八分钟，每十秒检查一次；可重试临界错误在本轮继续推进，遇到较长的官方等待期限则交回 timer。最后一个请求可能超过循环预算，香港 service 超时设十分钟。暂停确认后仍等待至少三十秒；实际停机时间取决于平台速度。
 
 `machine_cooldown` 未携带 `Retry-After` 时，一分钟后重新读取机器状态再尝试；不额外推测一个不可缩短的十分钟冷却。存在明确 `cooldownUntil` 或 `Retry-After` 时仍遵守期限。重试不会因次数达到固定上限而停止。
 
 没有既有任务的暂停会创建 `ensure_online` 恢复流程。正常冷却只抑制预期的租约和流程耗时告警，不再掩盖连续接口失败。机器 running 但 runtime 尚未 ready 时，在没有暂停意图或进行中生命周期操作的情况下维持租约；恢复成功仍需确认 ready 和新的运行起点。
 
-香港飞书适配会在首次故障、新增故障、全部恢复时通知，相同故障不会重复发送。香港服务 TimeoutStartSec 使用五分钟，以容纳上述短时快速检查。
+香港飞书适配在首次故障、新增故障、全部恢复时通知，相同故障不重复发送。安全锁 reason（包括 abuse_proxy）单独告警并显示等待截止时间，不能把它当普通运行冷却静默处理。公共控制器 health 同样报告安全锁 issue；本仓库不包含香港 webhook。
+
+状态新增 `observed_max_run_minutes`、`runtime_deadline_at`、`rotation_due_at`、`deadline_watch_until`（后三者为 epoch 秒）。日志记录 `runtime_limit_changed` 和真实轮换原因：`runtime_limit` 或 `scheduled_rotation`；旧 `seven_hours` 进行中状态保持兼容。
+
+两分钟余量覆盖通常的请求失败和暂停确认，不能保证管理接口持续不可用时仍赶得上；若官方先暂停进入冷却，则转为遵守期限的恢复流程，不强行唤醒。
